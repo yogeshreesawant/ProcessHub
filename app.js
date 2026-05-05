@@ -19,6 +19,7 @@ let taskDB = [];
 let userList = [];
 let currentUser = null;
 let userRole = 'employee'; // ADD THIS LINE
+let myChart = null; // To prevent chart duplication
 
 // 1. Check Session immediately
 async function checkSession() {
@@ -94,39 +95,45 @@ async function loadNotifications(userId) {
         .eq('user_id', userId)
         .order('created_at', { ascending: false });
 
-    // FIX: Add a check to ensure notifications is an array before filtering
-    if (error || !data) {
-        console.error("Could not load notifications:", error);
-        return;
-    }
+    if (error || !data) return;
 
     const list = document.getElementById('notif-list');
     const badge = document.getElementById('notif-count');
-    const unreadCount = data.filter(n => !n.is_read).length;
-
-    if (error || !data) return;
+    const unreadNotifications = data.filter(n => !n.is_read);
+    const unreadCount = unreadNotifications.length;
 
     // Update Badge
     if (unreadCount > 0) {
         badge.innerText = unreadCount;
         badge.style.display = 'flex';
     } else {
-        badge.style.display = 'none';
+        badge.innerText = ''; // Clear text
+        badge.style.setProperty("display", "none", "important");
     }
 
-    // Update List
+    // Update List with improved "Look and Feel"
     if (data.length > 0) {
         list.innerHTML = data.map(n => `
-            <div class="notif-item ${n.is_read ? '' : 'unread'}" onclick="markAsRead(${n.id})">
-                ${n.message}
-                <div style="font-size:10px; color:#94a3b8; margin-top:4px;">
-                    ${new Date(n.created_at).toLocaleDateString()}
+            <div class="notif-item ${n.is_read ? 'read' : 'unread'}" onclick="markAsRead('${n.id}')">
+                <div class="notif-status-dot"></div>
+                <div class="notif-content">
+                    <div class="notif-message">${n.message}</div>
+                    <div class="notif-time">${formatDate(n.created_at)}</div>
                 </div>
             </div>
         `).join('');
     } else {
-        list.innerHTML = '<div class="notif-empty">No new notifications</div>';
+        list.innerHTML = `
+            <div class="notif-empty">
+                <p>All caught up! 🎉</p>
+            </div>`;
     }
+}
+
+// Helper for cleaner dates
+function formatDate(dateString) {
+    const options = { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' };
+    return new Date(dateString).toLocaleDateString(undefined, options);
 }
 
 async function sendInternalNotification(targetUserId, msg) {
@@ -152,21 +159,74 @@ async function sendInternalNotification(targetUserId, msg) {
 }
 
 async function markAsRead(id) {
-    await supabaseClient.from('notifications').update({ is_read: true }).eq('id', id);
-    // Refresh the list
-    const { data: { user } } = await supabaseClient.auth.getUser();
-    loadNotifications(user.id);
+    console.log("Forcing read status for:", id);
+
+    // 1. INSTANT UI FEEDBACK (The "Liar" Technique)
+    // We manually hide the badge and update the list locally 
+    // so the user sees success instantly.
+    const badge = document.getElementById('notif-count');
+    if (badge) {
+        badge.style.setProperty("display", "none", "important");
+        badge.innerText = "0"; // Reset text just in case
+    }
+
+    // 2. Background Database Update
+    const { error } = await supabaseClient
+        .from('notifications')
+        .update({ is_read: true })
+        .eq('id', id);
+
+    if (error) {
+        console.error("DB Update failed:", error);
+        return;
+    }
+
+    // 3. DELAYED REFRESH
+    // We wait 300ms before refreshing the list to ensure 
+    // Supabase has indexed the "read" status.
+    setTimeout(async () => {
+        if (currentUser) {
+            await loadNotifications(currentUser.id);
+        }
+    }, 300);
+
+    // 4. Navigation
+    navigateToSection('tasks');
+    
+    const notifMenu = document.getElementById('notif-menu');
+    if (notifMenu) notifMenu.classList.remove('active');
 }
 
-// Update your checkSession to call loadNotifications
-async function checkSession() {
-    const { data: { session } } = await supabaseClient.auth.getSession();
-    if (!session) {
-        window.location.href = 'index.html';
-    } else {
-        document.body.style.visibility = 'visible';
-        loadUserInfo(session.user);
-        loadNotifications(session.user.id); // Add this
+// Helper function to handle section switching reliably
+function navigateToSection(targetId) {
+    const sections = document.querySelectorAll('.content-section');
+    const navItems = document.querySelectorAll('.nav-item');
+
+    // Hide all sections
+    sections.forEach(s => s.style.display = 'none');
+    
+    // Show target section
+    const targetSection = document.getElementById(`content-${targetId}`);
+    if (targetSection) {
+        targetSection.style.display = 'block';
+    }
+
+    // Update Nav UI
+    navItems.forEach(item => {
+        item.classList.remove('active');
+        if (item.getAttribute('data-target') === targetId) {
+            item.classList.add('active');
+        }
+    });
+
+    // Special: If going to tasks, re-render the board
+    if (targetId === 'tasks') {
+        renderBoard();
+    }
+    // ADD THIS: Trigger reports when moving to the reports section
+    if (targetId === 'reports') {
+        runProcessReport();
+        runTeamReport();
     }
 }
 
@@ -343,6 +403,9 @@ function setupNavigation() {
         item.addEventListener('click', (e) => {
             e.preventDefault();
             const target = item.getAttribute('data-target');
+            if (target) {
+                navigateToSection(target);
+            }
 
             if (!target) return;
 
@@ -375,7 +438,7 @@ window.addEventListener('DOMContentLoaded', () => {
 // Kanban Creation Logic
 async function loadKanban() {
     // 1. Fetch ALL users
-    await fetchUserList(); 
+    await fetchUserList();
 
     // 2. Fetch Tasks
     const { data: tasks } = await supabaseClient.from('tasks').select('*');
@@ -397,26 +460,33 @@ async function renderBoard() {
         column.innerHTML = `
             <div class="column-header">
                 <h3>${p.name}</h3>
-                ${(userRole === 'admin' || userRole === 'manager') ? 
-                    `<button class="add-task-btn" onclick="addTask('${p.id}')">+</button>` : ''}
+                ${(userRole === 'admin' || userRole === 'manager') ?
+                `<button class="add-task-btn" onclick="addTask('${p.id}')">+</button>` : ''}
             </div>
             <div class="task-list" id="list-${p.id}"></div>
         `;
         board.appendChild(column);
 
         const listContainer = document.getElementById(`list-${p.id}`);
-        
-        // 2. APPLY FILTERING LOGIC
-        let columnTasks = taskDB.filter(t => t.proc_id === p.id);
-        
-        // If employee, only show their assigned tasks
-        if (userRole === 'employee' && currentUser) {
-            columnTasks = columnTasks.filter(t => t.assignee_id === currentUser.id);
-        }
+
+        // --- STRICT FILTERING LOGIC ---
+        let columnTasks = taskDB.filter(t => {
+            const isMatchProcess = t.proc_id === p.id;
+            // Access Logic:
+            // 1. Admins see everything.
+            // 2. Managers see tasks they created (manager_id).
+            // 3. Employees see tasks assigned to them (assignee_id).
+            const hasAccess = 
+                userRole === 'admin' || 
+                t.manager_id === currentUser.id || 
+                t.assignee_id === currentUser.id;
+
+            return isMatchProcess && hasAccess;
+        });
 
         // 3. Render the filtered cards
         if (columnTasks.length === 0) {
-            listContainer.innerHTML = `<div class="empty-state">No tasks</div>`;
+            listContainer.innerHTML = `<div class="empty-state">No accessible tasks</div>`;
         } else {
             columnTasks.forEach(task => {
                 const card = createTaskCard(task, p.target);
@@ -430,7 +500,7 @@ async function renderBoard() {
 // function createTaskCard(task, target) {
 //     const card = document.createElement('div');
 //     card.className = `card ${task.status}`;
-    
+
 //     // We build the assignee options separately so the template stays clean
 //     const assigneeOptions = userList.map(u => {
 //         const name = u.full_name || u.email || "Unknown";
@@ -439,7 +509,7 @@ async function renderBoard() {
 
 //     card.innerHTML = `
 //         <div class="card-id-badge">ID: ${task.id.substring(0, 8)}...</div>
-        
+
 //         <div class="card-top">
 //             <button class="delete-task-btn" onclick="deleteTask('${task.id}')">X</button>
 //         </div>
@@ -468,7 +538,7 @@ async function renderBoard() {
 //                     <input type="number" value="${task.errors || 0}" onchange="updateTask('${task.id}', 'errors', this.value)">
 //                 </div>
 //             </div>
-            
+
 //             <div class="card-row">
 //                 <div class="input-group">
 //                     <div class="label">Start</div>
@@ -502,11 +572,14 @@ function createTaskCard(task, target) {
     const card = document.createElement('div');
     // Ensure the class reflects the status for CSS styling
     card.className = `card ${task.status || 'new'}`;
-    
+
     const assigneeOptions = userList.map(u => {
         const name = u.full_name || u.email || "Unknown";
         return `<option value="${u.id}" ${task.assignee_id === u.id ? 'selected' : ''}>${name}</option>`;
     }).join('');
+
+    // Logic: If user is an employee, the assignee dropdown should be disabled
+    const isEmployee = userRole === 'employee';
 
     card.innerHTML = `
         <div style="display:flex; justify-content:space-between; align-items:start;">
@@ -515,7 +588,7 @@ function createTaskCard(task, target) {
         </div>
 
         <div class="label">Assignee</div>
-        <select onchange="updateTask('${task.id}', 'assignee_id', this.value)">
+        <select onchange="updateTask('${task.id}', 'assignee_id', this.value)" ${isEmployee ? 'disabled' : ''} style="${isEmployee ? 'background-color: #f1f5f9; cursor: not-allowed;' : ''}">
             <option value="">Unassigned</option>
             ${assigneeOptions}
         </select>
@@ -564,15 +637,15 @@ async function addTask(procId) {
     console.log("Creating temporary task for:", procId);
 
     // 1. Create a local-only task object
-    const newTask = { 
+    const newTask = {
         id: crypto.randomUUID(), // Temporary unique ID
-        proc_id: procId, 
-        region: REGIONS[0], 
+        proc_id: procId,
+        region: REGIONS[0],
         assignee_id: null,
+        manager_id: currentUser.id, // CRITICAL: Marks who created the task
         files: 0,
         errors: 0,
         status: 'new',
-        manager_id: currentUser?.id || null, // Store current user as manager
         created_at: new Date().toISOString()
     };
 
@@ -600,7 +673,7 @@ async function fetchUserList() {
         return;
     }
 
-    userList = data || []; 
+    userList = data || [];
     console.log("Total users fetched for dropdown:", userList.length);
 }
 
@@ -655,6 +728,11 @@ async function deleteTask(id) { // Use 'id' as the parameter
 
 // 1. Modified updateTask (Local only)
 function updateTask(taskId, key, value) {
+    // Block employees from updating assignee_id via code/console
+    if (userRole === 'employee' && key === 'assignee_id') {
+        console.warn("Employees cannot change assignees.");
+        return;
+    }
     const task = taskDB.find(t => t.id === taskId);
     if (task) {
         task[key] = value;
@@ -672,7 +750,7 @@ function updateTask(taskId, key, value) {
 // 2. The Save Function (The Backend Commit)
 async function saveAllChanges() {
     const saveBtn = document.getElementById('save-kanban-btn');
-    
+
     // SAFETY CHECK: If currentUser isn't loaded yet, try to fetch it again
     if (!currentUser) {
         const { data: { user } } = await supabaseClient.auth.getUser();
@@ -701,8 +779,8 @@ async function saveAllChanges() {
 
             // Check if assignee exists AND is not the person saving the task
             if (task.assignee_id && task.assignee_id !== currentUser.id) {
-                const message = `New task assigned: ${task.proc_id.toUpperCase()} - ID: ${task.id.substring(0,8)}`;
-                
+                const message = `New task assigned: ${task.proc_id.toUpperCase()} - ID: ${task.id.substring(0, 8)}`;
+
                 console.log("Attempting to send notification to:", task.assignee_id);
                 await sendInternalNotification(task.assignee_id, message);
             }
@@ -720,7 +798,7 @@ async function saveAllChanges() {
     }
 }
 
-window.toggleProfileMenu = function() {
+window.toggleProfileMenu = function () {
     const menu = document.getElementById('profile-menu');
     if (menu) menu.classList.toggle('active');
 };
@@ -732,10 +810,137 @@ function setupRealtime() {
             'postgres_changes',
             { event: '*', schema: 'public', table: 'tasks' },
             (payload) => {
-                console.log('Change received!', payload);
+                // console.log('Change received!', payload);
                 // Refresh the local taskDB and re-render
-                loadKanban(); 
+                loadKanban();
             }
         )
         .subscribe();
+}
+
+// Report Creation
+// 1. Process Report (Pie Chart & Summary Boxes)
+function runProcessReport() {
+    // Check if Chart library exists
+    if (typeof Chart === 'undefined') {
+        console.error("Chart.js library not loaded yet.");
+        const ui = document.getElementById('report-ui');
+        if (ui) ui.innerHTML = '<p style="color:red">Charts are currently unavailable. Please refresh.</p>';
+        return;
+    }
+    const ui = document.getElementById('report-ui');
+    if (!ui) return;
+    ui.innerHTML = '';
+    
+    let chartLabels = [];
+    let chartData = [];
+
+    PROCESSES.forEach(p => {
+        // Use taskDB (your Supabase local array) and check proc_id
+        const tasks = taskDB.filter(t => t.proc_id === p.id);
+        const sumFiles = tasks.reduce((acc, t) => acc + parseInt(t.files || 0), 0);
+        const sumStatus = (status) => tasks.filter(t => t.status === status).reduce((acc, t) => acc + parseInt(t.files || 0), 0);
+        
+        chartLabels.push(p.name);
+        chartData.push(sumFiles);
+
+        ui.innerHTML += `
+            <div class="report-box">
+                <h4 style="margin:0 0 10px 0; color:#1e3a8a; font-size:12px; border-bottom:2px solid #3b82f6">${p.name}</h4>
+                <div class="stat-row" style="display:flex; justify-content:space-between; font-size:13px; margin:4px 0;">
+                    <span>Total Files</span> <b>${sumFiles}</b>
+                </div>
+                <div class="stat-row" style="display:flex; justify-content:space-between; font-size:13px; margin:4px 0;">
+                    <span>Completed</span> <b style="color:#10b981">${sumStatus('completed')}</b>
+                </div>
+                <div class="stat-row" style="display:flex; justify-content:space-between; font-size:13px; margin:4px 0;">
+                    <span>Pending</span> <b style="color:#3b82f6">${sumStatus('inprogress')}</b>
+                </div>
+                <div class="stat-row" style="display:flex; justify-content:space-between; font-size:13px; margin:4px 0;">
+                    <span>On Hold</span> <b style="color:#94a3b8">${sumStatus('onhold')}</b>
+                </div>
+                <div class="stat-row" style="display:flex; justify-content:space-between; font-size:13px; margin:4px 0;">
+                    <span>Errors</span> <b style="color:#ef4444">${tasks.reduce((a, b) => a + parseInt(b.errors || 0), 0)}</b>
+                </div>
+            </div>
+        `;
+    });
+
+    // Pie Chart Logic
+    const canvas = document.getElementById('processChart');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    
+    if (myChart) myChart.destroy();
+    myChart = new Chart(ctx, {
+        type: 'pie',
+        data: {
+            labels: chartLabels,
+            datasets: [{
+                data: chartData,
+                backgroundColor: ['#1e3a8a', '#3b82f6', '#10b981', '#f59e0b']
+            }]
+        },
+        options: { 
+            responsive: true, 
+            plugins: { legend: { position: 'bottom', labels: { boxWidth: 12, font: { size: 10 } } } } 
+        }
+    });
+}
+
+// 2. Team Report (Performance Matrix Table)
+function runTeamReport() {
+    const ui = document.getElementById('team-ui');
+    if (!ui) return;
+
+    // Get unique assignee IDs from the tasks
+    const uniqueAssigneeIds = [...new Set(taskDB.map(t => t.assignee_id))].filter(id => id);
+    
+    let tableHTML = `
+        <h3 style="color:#1e3a8a; margin-top:20px;">Team Performance Matrix</h3>
+        <table class="team-table" style="width:100%; border-collapse:collapse; margin-top:10px;">
+            <thead>
+                <tr style="background:#f8fafc; text-align:left;">
+                    <th style="padding:10px; border-bottom:2px solid #e2e8f0;">User Name</th>
+                    <th style="padding:10px; border-bottom:2px solid #e2e8f0;">Total Files Completed</th>
+                </tr>
+            </thead>
+            <tbody>
+    `;
+
+    uniqueAssigneeIds.forEach(id => {
+        // Find user name from our global userList
+        const userObj = userList.find(u => u.id === id);
+        const userName = userObj ? (userObj.full_name || userObj.email) : "Unknown User";
+        
+        const completedCount = taskDB
+            .filter(t => t.assignee_id === id && t.status === 'completed')
+            .reduce((a, b) => a + parseInt(b.files || 0), 0);
+
+        tableHTML += `
+            <tr style="border-bottom:1px solid #f1f5f9;">
+                <td style="padding:10px;">${userName}</td>
+                <td style="padding:10px;"><b>${completedCount}</b></td>
+            </tr>`;
+    });
+
+    tableHTML += `</tbody></table>`;
+    ui.innerHTML = tableHTML;
+}
+
+// 3. Updated CSV Export
+function exportToExcel() {
+    let csv = "Task ID,Process,Assignee,Region,Files,Errors,Start,End,Status\n";
+    taskDB.forEach(t => {
+        const user = userList.find(u => u.id === t.assignee_id);
+        const name = user ? (user.full_name || user.email) : 'Unassigned';
+        
+        csv += `${t.id},${t.proc_id},"${name}",${t.region},${t.files},${t.errors},${t.start_date || ''},${t.end_date || ''},${t.status}\n`;
+    });
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.setAttribute('href', url);
+    a.setAttribute('download', `Production_Report_${new Date().toLocaleDateString()}.csv`);
+    a.click();
 }
