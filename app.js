@@ -14,12 +14,18 @@ const PROCESSES = [
     { id: 'adj', name: 'Adjustment', target: 228 }
 ];
 
+let columnStates = {
+    'pre': true, 'sign': true, 'assoc': true, 'adj': true 
+};
+
 // Initialize global data arrays
 let taskDB = [];
 let userList = [];
 let currentUser = null;
 let userRole = 'employee'; // ADD THIS LINE
 let myChart = null; // To prevent chart duplication
+// Add a global state for card expansion
+let cardsExpanded = true;
 
 // 1. Check Session immediately
 async function checkSession() {
@@ -81,6 +87,19 @@ async function logout() {
         window.location.href = 'index.html';
     } else {
         alert("Logout failed: " + error.message);
+    }
+}
+
+function toggleColumn(procId) {
+    columnStates[procId] = !columnStates[procId];
+    renderBoard(); // Re-render to apply the state
+}
+
+function toggleSpecificTask(taskId) {
+    const task = taskDB.find(t => t.id === taskId);
+    if (task) {
+        task.isMinimized = !task.isMinimized;
+        renderBoard(); // Re-render the board to update the view
     }
 }
 
@@ -454,16 +473,17 @@ async function renderBoard() {
     board.innerHTML = ''; // Clear board
 
     PROCESSES.forEach(p => {
+        const isVisible = columnStates[p.id];
         // 1. Create the Column Wrapper
         const column = document.createElement('div');
-        column.className = 'kanban-column';
+        column.className = `kanban-column ${isVisible ? '' : 'minimized'}`;
         column.innerHTML = `
-            <div class="column-header">
-                <h3>${p.name}</h3>
-                ${(userRole === 'admin' || userRole === 'manager') ?
-                `<button class="add-task-btn" onclick="addTask('${p.id}')">+</button>` : ''}
-            </div>
-            <div class="task-list" id="list-${p.id}"></div>
+            <div class="column-header" onclick="toggleColumn('${p.id}')" style="cursor:pointer">
+            <h3>${p.name} ${isVisible ? '▾' : '▸'}</h3>
+            ${(userRole === 'admin' || userRole === 'manager') ?
+            `<button class="add-task-btn" onclick="event.stopPropagation(); addTask('${p.id}')">+</button>` : ''}
+        </div>
+        <div class="task-list" id="list-${p.id}" style="display: ${isVisible ? 'block' : 'none'}"></div>
         `;
         board.appendChild(column);
 
@@ -489,6 +509,8 @@ async function renderBoard() {
             listContainer.innerHTML = `<div class="empty-state">No accessible tasks</div>`;
         } else {
             columnTasks.forEach(task => {
+                if (task.isMinimized === undefined) task.isMinimized = false;
+
                 const card = createTaskCard(task, p.target);
                 listContainer.appendChild(card);
             });
@@ -571,7 +593,10 @@ async function renderBoard() {
 function createTaskCard(task, target) {
     const card = document.createElement('div');
     // Ensure the class reflects the status for CSS styling
-    card.className = `card ${task.status || 'new'}`;
+    card.className = `card ${task.status || 'new'} ${task.isMinimized ? 'minimized-card' : ''}`;
+
+    // Check if user is allowed to delete
+    const canDelete = (userRole === 'admin' || userRole === 'manager');
 
     const assigneeOptions = userList.map(u => {
         const name = u.full_name || u.email || "Unknown";
@@ -582,50 +607,56 @@ function createTaskCard(task, target) {
     const isEmployee = userRole === 'employee';
 
     card.innerHTML = `
-        <div style="display:flex; justify-content:space-between; align-items:start;">
-            <div class="card-id-badge">${task.id.substring(0, 8).toUpperCase()}</div>
-            <button class="delete-task-btn" onclick="deleteTask('${task.id}')">✕</button>
+        <div class="card-header" style="display:flex; justify-content:space-between; align-items:center; cursor:pointer;" 
+             onclick="toggleSpecificTask('${task.id}')">
+            <div>
+                <span class="toggle-icon">${task.isMinimized ? '▶' : '▼'}</span>
+                <strong>ID: ${task.id.substring(0, 8).toUpperCase()}</strong>
+            </div>
+            ${canDelete ? `<button class="delete-task-btn" onclick="event.stopPropagation(); deleteTask('${task.id}')">✕</button>` : ''}
         </div>
 
-        <div class="label">Assignee</div>
-        <select onchange="updateTask('${task.id}', 'assignee_id', this.value)" ${isEmployee ? 'disabled' : ''} style="${isEmployee ? 'background-color: #f1f5f9; cursor: not-allowed;' : ''}">
-            <option value="">Unassigned</option>
-            ${assigneeOptions}
-        </select>
+        <div class="card-body" style="display: ${task.isMinimized ? 'none' : 'block'}">
+            <div class="label">Assignee</div>
+            <select onchange="updateTask('${task.id}', 'assignee_id', this.value)" ${isEmployee ? 'disabled' : ''} style="${isEmployee ? 'background-color: #f1f5f9; cursor: not-allowed;' : ''}">
+                <option value="">Unassigned</option>
+                ${assigneeOptions}
+            </select>
 
-        <div class="card-grid">
-            <div>
-                <div class="label">Files</div>
-                <input type="number" value="${task.files || 0}" onchange="updateTask('${task.id}', 'files', this.value)">
+            <div class="card-grid">
+                <div>
+                    <div class="label">Files</div>
+                    <input type="number" value="${task.files || 0}" onchange="updateTask('${task.id}', 'files', this.value)">
+                </div>
+                <div>
+                    <div class="label">Errors</div>
+                    <input type="number" value="${task.errors || 0}" onchange="updateTask('${task.id}', 'errors', this.value)">
+                </div>
             </div>
-            <div>
-                <div class="label">Errors</div>
-                <input type="number" value="${task.errors || 0}" onchange="updateTask('${task.id}', 'errors', this.value)">
-            </div>
-        </div>
 
-        <div class="card-grid">
-            <div>
-                <div class="label">Start Date</div>
-                <input type="date" value="${task.start_date || ''}" onchange="updateTask('${task.id}', 'start_date', this.value)">
+            <div class="card-grid">
+                <div>
+                    <div class="label">Start Date</div>
+                    <input type="date" value="${task.start_date || ''}" onchange="updateTask('${task.id}', 'start_date', this.value)">
+                </div>
+                <div>
+                    <div class="label">End Date</div>
+                    <input type="date" value="${task.end_date || ''}" onchange="updateTask('${task.id}', 'end_date', this.value)">
+                </div>
             </div>
-            <div>
-                <div class="label">End Date</div>
-                <input type="date" value="${task.end_date || ''}" onchange="updateTask('${task.id}', 'end_date', this.value)">
+
+            <div class="label">Status</div>
+            <select onchange="updateTask('${task.id}', 'status', this.value)" style="font-weight:bold;">
+                <option value="new" ${task.status === 'new' ? 'selected' : ''}>NEW</option>
+                <option value="inprogress" ${task.status === 'inprogress' ? 'selected' : ''}>IN PROGRESS</option>
+                <option value="onhold" ${task.status === 'onhold' ? 'selected' : ''}>ON HOLD</option>
+                <option value="completed" ${task.status === 'completed' ? 'selected' : ''}>COMPLETED</option>
+                <option value="error" ${task.status === 'error' ? 'selected' : ''}>ERROR</option>
+            </select>
+
+            <div class="est-pill">
+                ⏱️ EST: ${target > 0 ? (task.files / target).toFixed(2) : 0} Hrs
             </div>
-        </div>
-
-        <div class="label">Status</div>
-        <select onchange="updateTask('${task.id}', 'status', this.value)" style="font-weight:bold;">
-            <option value="new" ${task.status === 'new' ? 'selected' : ''}>NEW</option>
-            <option value="inprogress" ${task.status === 'inprogress' ? 'selected' : ''}>IN PROGRESS</option>
-            <option value="onhold" ${task.status === 'onhold' ? 'selected' : ''}>ON HOLD</option>
-            <option value="completed" ${task.status === 'completed' ? 'selected' : ''}>COMPLETED</option>
-            <option value="error" ${task.status === 'error' ? 'selected' : ''}>ERROR</option>
-        </select>
-
-        <div class="est-pill">
-            ⏱️ EST: ${target > 0 ? (task.files / target).toFixed(2) : 0} Hrs
         </div>
     `;
     return card;
